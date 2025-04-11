@@ -3,8 +3,35 @@ kind: ConfigMap
 metadata:
   name: wikibench-env-config
 data:
-  TRACE_FILE_URL: "https://storage.googleapis.com/tesis-cb-drl/trace/example.trace"
+  TRACE_FILE_URL: "/mnt/trace/currenttmp"
   TARGET_URL: "http://productpage.default.svc.cluster.local:9080/productpage?u=normal"
+
+---
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: wikibench-pv
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadOnlyMany
+  hostPath:
+    path: "/data/wikibench"  # path in Minikube VM
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wikibench-pvc
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 2Gi
 
 ---
 
@@ -32,6 +59,13 @@ spec:
           envFrom:
             - configMapRef:
                 name: wikibench-env-config
+          volumeMounts:
+            - mountPath: /mnt/trace
+              name: wikibench-volume
+      volumes:
+        - name: wikibench-volume
+          persistentVolumeClaim:
+            claimName: wikibench-pvc
 
 ---
 

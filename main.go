@@ -20,7 +20,7 @@ var (
 type Request struct {
 	ID        int
 	Timestamp float64
-	Index     int // for heap
+	Index     int
 }
 
 type RequestHeap []Request
@@ -37,69 +37,46 @@ func (h *RequestHeap) Pop() interface{} {
 	return item
 }
 
-func streamFromURL(url string) (*bufio.Scanner, func(), error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cleanup := func() {
-		resp.Body.Close()
-	}
-
-	return bufio.NewScanner(resp.Body), cleanup, nil
-}
-
-func sendRequest(url string, delay time.Duration, wg *sync.WaitGroup) {
+func sendRequest(url string, delay time.Duration, wg *sync.WaitGroup, id int) {
 	defer wg.Done()
 	time.Sleep(delay)
 	resp, err := http.Get(url)
 	if err != nil {
 		logger.Error("Error while sending request",
 			zap.String("error", err.Error()),
+			zap.Int("event_id", id),
 		)
 		return
 	}
 	defer resp.Body.Close()
 
 	logger.Info("Request sent",
-		zap.Int("status_code", resp.StatusCode))
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("event_id", id))
 }
 
 func startSimulation() {
-	traceFileURL := os.Getenv("TRACE_FILE_URL")
-	if traceFileURL == "" {
-		logger.Error("TRACE_FILE_URL is not set in .env file")
-		return
-	}
-
-	logger.Info("Streaming trace file from URL",
-		zap.String("url", traceFileURL))
-
-	scanner, cleanup, err := streamFromURL(traceFileURL)
-	if err != nil {
-		logger.Error("Error streaming trace file",
-			zap.String("error", err.Error()),
-		)
-		return
-	}
-	defer cleanup()
-
+	traceFilePath := os.Getenv("TRACE_FILE_URL")
 	targetURL := os.Getenv("TARGET_URL")
-	if targetURL == "" {
-		logger.Error("TARGET_URL is not set in .env file")
+	if traceFilePath == "" || targetURL == "" {
+		logger.Fatal("TRACE_FILE_URL and TARGET_URL must be set")
 		return
 	}
 
-	logger.Info("Starting request simulation",
-		zap.String("target_url", targetURL))
+	file, err := os.Open(traceFilePath)
+	if err != nil {
+		logger.Error("Failed to open local trace file",
+			zap.String("error", err.Error()))
+		return
+	}
+	defer file.Close()
 
+	scanner := bufio.NewScanner(file)
 	var requestHeap RequestHeap
 	heap.Init(&requestHeap)
 
-	startTime := time.Now()
 	firstTimestamp := -1.0
-
+	startTime := time.Now()
 	var wg sync.WaitGroup
 
 	for scanner.Scan() {
@@ -109,14 +86,17 @@ func startSimulation() {
 			continue
 		}
 
-		id, _ := strconv.Atoi(parts[0])
-		timestamp, _ := strconv.ParseFloat(parts[1], 64)
-
-		if firstTimestamp == -1.0 {
-			firstTimestamp = timestamp
+		id, err1 := strconv.Atoi(parts[0])
+		ts, err2 := strconv.ParseFloat(parts[1], 64)
+		if err1 != nil || err2 != nil {
+			continue
 		}
 
-		heap.Push(&requestHeap, Request{ID: id, Timestamp: timestamp})
+		if firstTimestamp == -1.0 {
+			firstTimestamp = ts
+		}
+
+		heap.Push(&requestHeap, Request{ID: id, Timestamp: ts})
 
 		for requestHeap.Len() > 0 {
 			req := heap.Pop(&requestHeap).(Request)
@@ -128,7 +108,7 @@ func startSimulation() {
 			}
 
 			wg.Add(1)
-			go sendRequest(targetURL, 0, &wg)
+			go sendRequest(targetURL, 0, &wg, req.ID)
 		}
 	}
 
@@ -139,7 +119,7 @@ func startSimulation() {
 func startHandler(w http.ResponseWriter, r *http.Request) {
 	go startSimulation()
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Simulation started"))
+	w.Write([]byte("Real-time simulation started"))
 }
 
 func init() {
