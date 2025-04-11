@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: wikibench-env-config
 data:
-  TRACE_FILE_URL: "/mnt/trace/currenttmp"
+  TRACE_FILE_URL: "./../mnt/trace/currenttmp"
   TARGET_URL: "http://productpage.default.svc.cluster.local:9080/productpage?u=normal"
 
 ---
