@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"container/heap"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"net/http"
@@ -20,26 +19,9 @@ var (
 type Request struct {
 	ID        int
 	Timestamp float64
-	Index     int
 }
 
-type RequestHeap []Request
-
-func (h RequestHeap) Len() int            { return len(h) }
-func (h RequestHeap) Less(i, j int) bool  { return h[i].Timestamp < h[j].Timestamp }
-func (h RequestHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *RequestHeap) Push(x interface{}) { *h = append(*h, x.(Request)) }
-func (h *RequestHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[0 : n-1]
-	return item
-}
-
-func sendRequest(url string, delay time.Duration, wg *sync.WaitGroup, id int) {
-	defer wg.Done()
-	time.Sleep(delay)
+func sendRequest(url string, id int) {
 	resp, err := http.Get(url)
 	if err != nil {
 		logger.Error("Error while sending request",
@@ -55,7 +37,7 @@ func sendRequest(url string, delay time.Duration, wg *sync.WaitGroup, id int) {
 		zap.Int("event_id", id))
 }
 
-func startSimulation() {
+func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 	traceFilePath := os.Getenv("TRACE_FILE_URL")
 	targetURL := os.Getenv("TARGET_URL")
 	if traceFilePath == "" || targetURL == "" {
@@ -71,13 +53,24 @@ func startSimulation() {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	var requestHeap RequestHeap
-	heap.Init(&requestHeap)
-
-	firstTimestamp := -1.0
 	startTime := time.Now()
+	var firstTimestamp float64 = -1
+
+	scanner := bufio.NewScanner(file)
+	requests := make(chan Request, bufferSize) // buffered channel
 	var wg sync.WaitGroup
+
+	// Worker pool: limit concurrency to prevent OOM
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			for req := range requests {
+				sendRequest(targetURL, req.ID)
+				wg.Done()
+			}
+		}()
+	}
+
+	durationLimit := float64(durationMinutes * 60) // convert to seconds
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -92,34 +85,54 @@ func startSimulation() {
 			continue
 		}
 
-		if firstTimestamp == -1.0 {
+		if firstTimestamp < 0 {
 			firstTimestamp = ts
 		}
 
-		heap.Push(&requestHeap, Request{ID: id, Timestamp: ts})
-
-		for requestHeap.Len() > 0 {
-			req := heap.Pop(&requestHeap).(Request)
-			delay := time.Duration((req.Timestamp - firstTimestamp) * float64(time.Second))
-			deltaTime := time.Since(startTime)
-
-			if delay > deltaTime {
-				time.Sleep(delay - deltaTime)
-			}
-
-			wg.Add(1)
-			go sendRequest(targetURL, 0, &wg, req.ID)
+		delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
+		if (ts - firstTimestamp) > durationLimit {
+			break
 		}
+
+		timeElapsed := time.Since(startTime)
+		if delay > timeElapsed {
+			time.Sleep(delay - timeElapsed)
+		}
+
+		wg.Add(1)
+		requests <- Request{ID: id, Timestamp: ts}
 	}
 
 	wg.Wait()
+	close(requests)
 	logger.Info("Request simulation completed")
 }
 
 func startHandler(w http.ResponseWriter, r *http.Request) {
-	go startSimulation()
+	durationStr := r.URL.Query().Get("duration")
+	durationMinutes := 5 // default
+	if durationStr != "" {
+		if val, err := strconv.Atoi(durationStr); err == nil {
+			durationMinutes = val
+		}
+	}
+	bufferStr := r.URL.Query().Get("buffer")
+	bufferSize := 1000 // default
+	if bufferStr != "" {
+		if val, err := strconv.Atoi(bufferStr); err == nil {
+			bufferSize = val
+		}
+	}
+	workerStr := r.URL.Query().Get("workers")
+	workerCount := 100 // default
+	if workerStr != "" {
+		if val, err := strconv.Atoi(workerStr); err == nil {
+			workerCount = val
+		}
+	}
+	go startSimulation(durationMinutes, bufferSize, workerCount)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Real-time simulation started"))
+	w.Write([]byte("Real-time simulation started for " + strconv.Itoa(durationMinutes) + " minutes with buffer size " + strconv.Itoa(bufferSize) + " and worker count " + strconv.Itoa(workerCount)))
 }
 
 func init() {
