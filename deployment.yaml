@@ -19,6 +19,7 @@ spec:
     - ReadOnlyMany
   hostPath:
     path: "/data/wikibench"  # path in Minikube VM
+  storageClassName: manual
 
 ---
 
@@ -32,7 +33,7 @@ spec:
   resources:
     requests:
       storage: 2Gi
-  volumeName: wikibench-pv
+  storageClassName: manual
 
 ---
 
