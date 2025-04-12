@@ -17,16 +17,14 @@ var (
 )
 
 type Request struct {
-	ID        int
 	Timestamp float64
 }
 
-func sendRequest(url string, id int) {
+func sendRequest(url string) {
 	resp, err := http.Get(url)
 	if err != nil {
 		logger.Error("Error while sending request",
 			zap.String("error", err.Error()),
-			zap.Int("event_id", id),
 		)
 		return
 	}
@@ -34,7 +32,7 @@ func sendRequest(url string, id int) {
 
 	logger.Info("Request sent",
 		zap.Int("status_code", resp.StatusCode),
-		zap.Int("event_id", id))
+	)
 }
 
 func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
@@ -63,8 +61,8 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 	// Worker pool: limit concurrency to prevent OOM
 	for i := 0; i < workerCount; i++ {
 		go func() {
-			for req := range requests {
-				sendRequest(targetURL, req.ID)
+			for _ = range requests {
+				sendRequest(targetURL)
 				wg.Done()
 			}
 		}()
@@ -79,9 +77,8 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 			continue
 		}
 
-		id, err1 := strconv.Atoi(parts[0])
-		ts, err2 := strconv.ParseFloat(parts[1], 64)
-		if err1 != nil || err2 != nil {
+		ts, err := strconv.ParseFloat(parts[0], 64)
+		if err != nil {
 			continue
 		}
 
@@ -100,7 +97,7 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 		}
 
 		wg.Add(1)
-		requests <- Request{ID: id, Timestamp: ts}
+		requests <- Request{Timestamp: ts}
 	}
 
 	wg.Wait()
