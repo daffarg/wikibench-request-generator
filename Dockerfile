@@ -17,9 +17,6 @@ WORKDIR /root/
 
 COPY --from=builder /app/main .
 
-RUN apk add tzdata
-RUN cp /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-
 EXPOSE 8080
 
 CMD ["./main"]

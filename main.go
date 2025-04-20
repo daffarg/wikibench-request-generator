@@ -60,6 +60,13 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 	requests := make(chan Request, bufferSize) // buffered channel
 	var wg sync.WaitGroup
 
+	logger.Info("Request simulation started",
+		zap.Int64("timestamp", time.Now().Unix()),
+		zap.Int("duration_minutes", durationMinutes),
+		zap.Int("buffer_size", bufferSize),
+		zap.Int("worker_count", workerCount),
+	)
+
 	// Worker pool: limit concurrency to prevent OOM
 	for i := 0; i < workerCount; i++ {
 		go func() {
@@ -104,7 +111,9 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 
 	wg.Wait()
 	close(requests)
-	logger.Info("Request simulation completed")
+	logger.Info("Request simulation completed",
+		zap.Int64("timestamp", time.Now().Unix()),
+	)
 }
 
 func startHandler(w http.ResponseWriter, r *http.Request) {
