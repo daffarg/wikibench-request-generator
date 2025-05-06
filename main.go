@@ -96,7 +96,7 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 		}
 
 		delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
-		if (ts - firstTimestamp) > durationLimit {
+		if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
 			break
 		}
 
@@ -124,6 +124,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 			durationMinutes = val
 		}
 	}
+
 	bufferStr := r.URL.Query().Get("buffer")
 	bufferSize := 1000 // default
 	if bufferStr != "" {
