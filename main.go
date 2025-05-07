@@ -16,12 +16,24 @@ var (
 	logger *zap.Logger
 )
 
+var client = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		MaxConnsPerHost:     1000,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
+		ForceAttemptHTTP2:   false,
+	},
+}
+
 type Request struct {
 	Timestamp float64
 }
 
 func sendRequest(url string, timestamp float64) {
-	resp, err := http.Get(url)
+
+	resp, err := client.Get(url)
 	if err != nil {
 		logger.Error("Error while sending request",
 			zap.String("error", err.Error()),
