@@ -98,6 +98,10 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 			continue
 		}
 
+		if !strings.HasPrefix(parts[2], "http://en.wikipedia.org") {
+			continue
+		}
+
 		ts, err := strconv.ParseFloat(parts[0], 64)
 		if err != nil {
 			continue
