@@ -98,7 +98,7 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 			continue
 		}
 
-		if !strings.HasPrefix(parts[2], "http://en.wikipedia.org") {
+		if !strings.HasPrefix(parts[1], "http://en.wikipedia.org") {
 			continue
 		}
 
