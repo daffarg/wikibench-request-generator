@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -32,7 +33,6 @@ type Request struct {
 }
 
 func sendRequest(url string, timestamp float64) {
-
 	resp, err := client.Get(url)
 	if err != nil {
 		logger.Error("Error while sending request",
@@ -49,9 +49,19 @@ func sendRequest(url string, timestamp float64) {
 	)
 }
 
-func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
+// sampleRequest implements request-level sampling (0-1000 permil)
+func sampleRequest(reduction int) bool {
+	if reduction <= 0 {
+		return true
+	}
+	n := rand.Intn(1000) // 0..999
+	return n >= reduction
+}
+
+func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil int) {
 	traceFilePath := os.Getenv("TRACE_FILE_URL")
 	targetURL := os.Getenv("TARGET_URL")
+
 	if traceFilePath == "" || targetURL == "" {
 		logger.Fatal("TRACE_FILE_URL and TARGET_URL must be set")
 		return
@@ -77,9 +87,13 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 		zap.Int("duration_minutes", durationMinutes),
 		zap.Int("buffer_size", bufferSize),
 		zap.Int("worker_count", workerCount),
+		zap.Int("reduction_permil", reductionPermil),
 	)
 
-	// Worker pool: limit concurrency to prevent OOM
+	// Seed the random number generator
+	rand.Seed(time.Now().UnixNano())
+
+	// Worker pool
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for req := range requests {
@@ -121,8 +135,11 @@ func startSimulation(durationMinutes int, bufferSize int, workerCount int) {
 			time.Sleep(delay - timeElapsed)
 		}
 
-		wg.Add(1)
-		requests <- Request{Timestamp: ts}
+		// Apply request-level sampling
+		if sampleRequest(reductionPermil) {
+			wg.Add(1)
+			requests <- Request{Timestamp: ts}
+		}
 	}
 
 	wg.Wait()
@@ -148,6 +165,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 			bufferSize = val
 		}
 	}
+
 	workerStr := r.URL.Query().Get("workers")
 	workerCount := 100 // default
 	if workerStr != "" {
@@ -155,9 +173,22 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 			workerCount = val
 		}
 	}
-	go startSimulation(durationMinutes, bufferSize, workerCount)
+
+	reductionStr := r.URL.Query().Get("reduction")
+	reductionPermil := 0 // default: no reduction
+	if reductionStr != "" {
+		if val, err := strconv.Atoi(reductionStr); err == nil {
+			reductionPermil = val
+		}
+	}
+
+	go startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Real-time simulation started for " + strconv.Itoa(durationMinutes) + " minutes with buffer size " + strconv.Itoa(bufferSize) + " and worker count " + strconv.Itoa(workerCount)))
+	w.Write([]byte("Real-time simulation started for " +
+		strconv.Itoa(durationMinutes) + " minutes with buffer size " +
+		strconv.Itoa(bufferSize) + ", worker count " +
+		strconv.Itoa(workerCount) + ", and reduction permil " +
+		strconv.Itoa(reductionPermil)))
 }
 
 func init() {
