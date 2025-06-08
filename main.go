@@ -112,11 +112,69 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil i
 			continue
 		}
 
-		if !strings.HasPrefix(parts[1], "http://en.wikipedia.org") {
+		reqTimestamp := parts[0]
+		url := parts[1][7:] // Remove "http://"
+
+		if !strings.HasPrefix(url, "en.wikipedia.org") {
 			continue
 		}
 
-		ts, err := strconv.ParseFloat(parts[0], 64)
+		path := ""
+		index := strings.Index(url, "/")
+		if index != -1 {
+			path = url[index+1:] // strip off the domain + first slash
+		}
+
+		path = strings.Replace(path, "%2F", "/", -1)
+		path = strings.Replace(path, "%20", " ", -1)
+		path = strings.Replace(path, "&amp;", "&", -1)
+		path = strings.Replace(path, "%3A", ":", -1)
+
+		if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") {
+			continue
+		}
+
+		if strings.HasPrefix(path, "w/query.php") {
+			continue
+		}
+		if strings.HasPrefix(path, "wiki/Talk:") {
+			continue
+		}
+		if strings.Contains(path, "User+talk") {
+			continue
+		}
+		if strings.Contains(path, "User_talk") {
+			continue
+		}
+
+		if strings.HasPrefix(path, "wiki/Special:AutoLogin") {
+			continue
+		}
+		if strings.HasPrefix(path, "Special:UserLogin") {
+			continue
+		}
+
+		if strings.Contains(path, "User:") {
+			continue
+		}
+		if strings.Contains(path, "Talk:") {
+			continue
+		}
+		if strings.Contains(path, "&diff=") {
+			continue
+		}
+		if strings.Contains(path, "&action=rollback") {
+			continue
+		}
+		if strings.Contains(path, "Special:Watchlist") {
+			continue
+		}
+
+		if strings.HasPrefix(path, "w/api.php") {
+			continue
+		}
+
+		ts, err := strconv.ParseFloat(reqTimestamp, 64)
 		if err != nil {
 			continue
 		}
