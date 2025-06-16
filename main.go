@@ -14,7 +14,11 @@ import (
 )
 
 var (
-	logger *zap.Logger
+	logger        *zap.Logger
+	stopChan      chan struct{}
+	simulationWg  sync.WaitGroup
+	simulationMu  sync.Mutex
+	simulationRun bool
 )
 
 var client = &http.Client{
@@ -49,16 +53,15 @@ func sendRequest(url string, timestamp float64) {
 	)
 }
 
-// sampleRequest implements request-level sampling (0-1000 permil)
 func sampleRequest(reduction int) bool {
 	if reduction <= 0 {
 		return true
 	}
-	n := rand.Intn(1000) // 0..999
+	n := rand.Intn(1000)
 	return n >= reduction
 }
 
-func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil int) {
+func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil int, stop <-chan struct{}) {
 	traceFilePath := os.Getenv("TRACE_FILE_URL")
 	targetURL := os.Getenv("TARGET_URL")
 
@@ -78,8 +81,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil i
 	startTime := time.Now()
 	var firstTimestamp float64 = -1
 
-	scanner := bufio.NewScanner(file)
-	requests := make(chan Request, bufferSize) // buffered channel
+	requests := make(chan Request, bufferSize)
 	var wg sync.WaitGroup
 
 	logger.Info("Request simulation started",
@@ -90,10 +92,8 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil i
 		zap.Int("reduction_permil", reductionPermil),
 	)
 
-	// Seed the random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	// Worker pool
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for req := range requests {
@@ -103,113 +103,115 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil i
 		}()
 	}
 
-	durationLimit := float64(durationMinutes * 60) // convert to seconds
+	durationLimit := float64(durationMinutes * 60)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Split(line, " ")
-		if len(parts) < 3 {
-			continue
-		}
+	simulationMu.Lock()
+	simulationRun = true
+	simulationMu.Unlock()
+	defer func() {
+		simulationMu.Lock()
+		simulationRun = false
+		simulationMu.Unlock()
+	}()
 
-		reqTimestamp := parts[0]
-		url := parts[1][7:] // Remove "http://"
+	go func() {
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			select {
+			case <-stop:
+				logger.Info("Simulation stopped externally")
+				close(requests)
+				return
+			default:
+			}
 
-		if !strings.HasPrefix(url, "en.wikipedia.org") {
-			continue
-		}
+			line := scanner.Text()
+			parts := strings.Split(line, " ")
+			if len(parts) < 3 {
+				continue
+			}
 
-		path := ""
-		index := strings.Index(url, "/")
-		if index != -1 {
-			path = url[index+1:] // strip off the domain + first slash
-		}
+			reqTimestamp := parts[0]
+			url := parts[1][7:]
 
-		path = strings.Replace(path, "%2F", "/", -1)
-		path = strings.Replace(path, "%20", " ", -1)
-		path = strings.Replace(path, "&amp;", "&", -1)
-		path = strings.Replace(path, "%3A", ":", -1)
+			if !strings.HasPrefix(url, "en.wikipedia.org") {
+				continue
+			}
 
-		if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") {
-			continue
-		}
+			path := ""
+			index := strings.Index(url, "/")
+			if index != -1 {
+				path = url[index+1:]
+			}
 
-		if strings.HasPrefix(path, "w/query.php") {
-			continue
-		}
-		if strings.HasPrefix(path, "wiki/Talk:") {
-			continue
-		}
-		if strings.Contains(path, "User+talk") {
-			continue
-		}
-		if strings.Contains(path, "User_talk") {
-			continue
-		}
+			path = strings.Replace(path, "%2F", "/", -1)
+			path = strings.Replace(path, "%20", " ", -1)
+			path = strings.Replace(path, "&amp;", "&", -1)
+			path = strings.Replace(path, "%3A", ":", -1)
 
-		if strings.HasPrefix(path, "wiki/Special:AutoLogin") {
-			continue
-		}
-		if strings.HasPrefix(path, "Special:UserLogin") {
-			continue
-		}
+			if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") {
+				continue
+			}
+			if strings.HasPrefix(path, "w/query.php") ||
+				strings.HasPrefix(path, "wiki/Talk:") ||
+				strings.Contains(path, "User+talk") ||
+				strings.Contains(path, "User_talk") ||
+				strings.HasPrefix(path, "wiki/Special:AutoLogin") ||
+				strings.HasPrefix(path, "Special:UserLogin") ||
+				strings.Contains(path, "User:") ||
+				strings.Contains(path, "Talk:") ||
+				strings.Contains(path, "&diff=") ||
+				strings.Contains(path, "&action=rollback") ||
+				strings.Contains(path, "Special:Watchlist") ||
+				strings.HasPrefix(path, "w/api.php") {
+				continue
+			}
 
-		if strings.Contains(path, "User:") {
-			continue
-		}
-		if strings.Contains(path, "Talk:") {
-			continue
-		}
-		if strings.Contains(path, "&diff=") {
-			continue
-		}
-		if strings.Contains(path, "&action=rollback") {
-			continue
-		}
-		if strings.Contains(path, "Special:Watchlist") {
-			continue
-		}
+			ts, err := strconv.ParseFloat(reqTimestamp, 64)
+			if err != nil {
+				continue
+			}
 
-		if strings.HasPrefix(path, "w/api.php") {
-			continue
-		}
+			if firstTimestamp < 0 {
+				firstTimestamp = ts
+			}
 
-		ts, err := strconv.ParseFloat(reqTimestamp, 64)
-		if err != nil {
-			continue
-		}
+			delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
+			if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
+				break
+			}
 
-		if firstTimestamp < 0 {
-			firstTimestamp = ts
-		}
+			timeElapsed := time.Since(startTime)
+			if delay > timeElapsed {
+				time.Sleep(delay - timeElapsed)
+			}
 
-		delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
-		if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
-			break
+			if sampleRequest(reductionPermil) {
+				wg.Add(1)
+				requests <- Request{Timestamp: ts}
+			}
 		}
-
-		timeElapsed := time.Since(startTime)
-		if delay > timeElapsed {
-			time.Sleep(delay - timeElapsed)
-		}
-
-		// Apply request-level sampling
-		if sampleRequest(reductionPermil) {
-			wg.Add(1)
-			requests <- Request{Timestamp: ts}
-		}
-	}
+		close(requests)
+	}()
 
 	wg.Wait()
-	close(requests)
 	logger.Info("Request simulation completed",
 		zap.Int64("timestamp", time.Now().Unix()),
 	)
 }
 
 func startHandler(w http.ResponseWriter, r *http.Request) {
+	simulationMu.Lock()
+	defer simulationMu.Unlock()
+
+	if simulationRun {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte("Simulation is already running"))
+		return
+	}
+
 	durationStr := r.URL.Query().Get("duration")
-	durationMinutes := 5 // default
+	durationMinutes := 5
 	if durationStr != "" {
 		if val, err := strconv.Atoi(durationStr); err == nil {
 			durationMinutes = val
@@ -217,7 +219,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bufferStr := r.URL.Query().Get("buffer")
-	bufferSize := 1000 // default
+	bufferSize := 1000
 	if bufferStr != "" {
 		if val, err := strconv.Atoi(bufferStr); err == nil {
 			bufferSize = val
@@ -225,7 +227,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workerStr := r.URL.Query().Get("workers")
-	workerCount := 100 // default
+	workerCount := 100
 	if workerStr != "" {
 		if val, err := strconv.Atoi(workerStr); err == nil {
 			workerCount = val
@@ -233,20 +235,44 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reductionStr := r.URL.Query().Get("reduction")
-	reductionPermil := 0 // default: no reduction
+	reductionPermil := 0
 	if reductionStr != "" {
 		if val, err := strconv.Atoi(reductionStr); err == nil {
 			reductionPermil = val
 		}
 	}
 
-	go startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil)
+	stopChan = make(chan struct{})
+	simulationWg.Add(1)
+	go func() {
+		defer simulationWg.Done()
+		startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, stopChan)
+	}()
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Real-time simulation started for " +
 		strconv.Itoa(durationMinutes) + " minutes with buffer size " +
 		strconv.Itoa(bufferSize) + ", worker count " +
 		strconv.Itoa(workerCount) + ", and reduction permil " +
 		strconv.Itoa(reductionPermil)))
+}
+
+func stopHandler(w http.ResponseWriter, r *http.Request) {
+	simulationMu.Lock()
+	defer simulationMu.Unlock()
+
+	if !simulationRun {
+		logger.Warn("Stop requested but no simulation is running")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("No simulation is running"))
+		return
+	}
+
+	close(stopChan)
+	simulationWg.Wait()
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Simulation stopped"))
 }
 
 func init() {
@@ -258,6 +284,7 @@ func main() {
 	defer logger.Sync()
 
 	http.HandleFunc("/start", startHandler)
+	http.HandleFunc("/stop", stopHandler)
 	logger.Info("Server started on port 8080")
 	http.ListenAndServe(":8080", nil)
 }
