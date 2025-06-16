@@ -260,9 +260,9 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
 	simulationMu.Lock()
-	defer simulationMu.Unlock()
 
 	if !simulationRun {
+		simulationMu.Unlock()
 		logger.Warn("Stop requested but no simulation is running")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("No simulation is running"))
@@ -270,6 +270,8 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	close(stopChan)
+	simulationMu.Unlock()
+
 	simulationWg.Wait()
 
 	w.WriteHeader(http.StatusOK)
