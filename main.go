@@ -114,87 +114,88 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil i
 		simulationMu.Unlock()
 	}()
 
-	go func() {
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			select {
-			case <-stop:
-				logger.Info("Simulation stopped externally")
-				close(requests)
-				return
-			default:
-			}
-
-			line := scanner.Text()
-			parts := strings.Split(line, " ")
-			if len(parts) < 3 {
-				continue
-			}
-
-			reqTimestamp := parts[0]
-			url := parts[1][7:]
-
-			if !strings.HasPrefix(url, "en.wikipedia.org") {
-				continue
-			}
-
-			path := ""
-			index := strings.Index(url, "/")
-			if index != -1 {
-				path = url[index+1:]
-			}
-
-			path = strings.Replace(path, "%2F", "/", -1)
-			path = strings.Replace(path, "%20", " ", -1)
-			path = strings.Replace(path, "&amp;", "&", -1)
-			path = strings.Replace(path, "%3A", ":", -1)
-
-			if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") {
-				continue
-			}
-			if strings.HasPrefix(path, "w/query.php") ||
-				strings.HasPrefix(path, "wiki/Talk:") ||
-				strings.Contains(path, "User+talk") ||
-				strings.Contains(path, "User_talk") ||
-				strings.HasPrefix(path, "wiki/Special:AutoLogin") ||
-				strings.HasPrefix(path, "Special:UserLogin") ||
-				strings.Contains(path, "User:") ||
-				strings.Contains(path, "Talk:") ||
-				strings.Contains(path, "&diff=") ||
-				strings.Contains(path, "&action=rollback") ||
-				strings.Contains(path, "Special:Watchlist") ||
-				strings.HasPrefix(path, "w/api.php") {
-				continue
-			}
-
-			ts, err := strconv.ParseFloat(reqTimestamp, 64)
-			if err != nil {
-				continue
-			}
-
-			if firstTimestamp < 0 {
-				firstTimestamp = ts
-			}
-
-			delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
-			if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
-				break
-			}
-
-			timeElapsed := time.Since(startTime)
-			if delay > timeElapsed {
-				time.Sleep(delay - timeElapsed)
-			}
-
-			if sampleRequest(reductionPermil) {
-				wg.Add(1)
-				requests <- Request{Timestamp: ts}
-			}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		select {
+		case <-stop:
+			logger.Info("Simulation stopped externally")
+			goto end_loop
+		default:
 		}
-		close(requests)
-	}()
+
+		line := scanner.Text()
+		parts := strings.Split(line, " ")
+		if len(parts) < 3 {
+			continue
+		}
+
+		reqTimestamp := parts[0]
+		url := parts[1][7:]
+
+		if !strings.HasPrefix(url, "en.wikipedia.org") {
+			continue
+		}
+
+		path := ""
+		index := strings.Index(url, "/")
+		if index != -1 {
+			path = url[index+1:]
+		}
+
+		path = strings.Replace(path, "%2F", "/", -1)
+		path = strings.Replace(path, "%20", " ", -1)
+		path = strings.Replace(path, "&amp;", "&", -1)
+		path = strings.Replace(path, "%3A", ":", -1)
+
+		if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") {
+			continue
+		}
+		if strings.HasPrefix(path, "w/query.php") ||
+			strings.HasPrefix(path, "wiki/Talk:") ||
+			strings.Contains(path, "User+talk") ||
+			strings.Contains(path, "User_talk") ||
+			strings.HasPrefix(path, "wiki/Special:AutoLogin") ||
+			strings.HasPrefix(path, "Special:UserLogin") ||
+			strings.Contains(path, "User:") ||
+			strings.Contains(path, "Talk:") ||
+			strings.Contains(path, "&diff=") ||
+			strings.Contains(path, "&action=rollback") ||
+			strings.Contains(path, "Special:Watchlist") ||
+			strings.HasPrefix(path, "w/api.php") {
+			continue
+		}
+
+		ts, err := strconv.ParseFloat(reqTimestamp, 64)
+		if err != nil {
+			continue
+		}
+
+		if firstTimestamp < 0 {
+			firstTimestamp = ts
+		}
+
+		delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
+		if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
+			break
+		}
+
+		timeElapsed := time.Since(startTime)
+		if delay > timeElapsed {
+			time.Sleep(delay - timeElapsed)
+		}
+
+		if sampleRequest(reductionPermil) {
+			wg.Add(1)
+			requests <- Request{Timestamp: ts}
+		}
+	}
+
+end_loop:
+
+	close(requests)
 
 	wg.Wait()
+
 	logger.Info("Request simulation completed",
 		zap.Int64("timestamp", time.Now().Unix()),
 	)
