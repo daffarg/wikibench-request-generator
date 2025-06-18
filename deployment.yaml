@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: wikibench-env-config
 data:
-  TRACE_FILE_URL: "./../mnt/trace/currenttmp"
+  TRACE_DIR_PATH: "./../mnt/trace/"
   TARGET_URL: "http://productpage.default.svc.cluster.local:9080/productpage?u=normal"
 
 ---
@@ -14,7 +14,7 @@ metadata:
   name: wikibench-pv
 spec:
   capacity:
-    storage: 2Gi
+    storage: 50Gi
   accessModes:
     - ReadOnlyMany
   hostPath:
@@ -32,7 +32,7 @@ spec:
     - ReadOnlyMany
   resources:
     requests:
-      storage: 2Gi
+      storage: 50Gi
   storageClassName: manual
 
 ---
@@ -61,7 +61,7 @@ spec:
             value: "1"
       containers:
         - name: wikibench
-          image: daffarg/wikibench-request-generator:v1.17
+          image: daffarg/wikibench-request-generator:v1.18
           ports:
             - containerPort: 8080
           envFrom:
