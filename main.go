@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,11 +19,12 @@ import (
 )
 
 var (
-	logger        *zap.Logger
-	stopChan      chan struct{}
-	simulationWg  sync.WaitGroup
-	simulationMu  sync.Mutex
-	simulationRun bool
+	logger          *zap.Logger
+	stopChan        chan struct{}
+	simulationWg    sync.WaitGroup
+	simulationMu    sync.Mutex
+	simulationRun   bool
+	simulationState string // "STARTING", "RUNNING", "IDLE", "STOPPING", "STOPPED"
 )
 
 var client = &http.Client{
@@ -37,15 +39,17 @@ var client = &http.Client{
 }
 
 type Request struct {
+	FileName  string
 	Timestamp float64
 }
 
-func sendRequest(url string, timestamp float64) {
+func sendRequest(url string, timestamp float64, fileName string) {
 	resp, err := client.Get(url)
 	if err != nil {
 		logger.Error("Error while sending request",
 			zap.String("error", err.Error()),
 			zap.Float64("timestamp", timestamp),
+			zap.String("file_name", fileName),
 		)
 		return
 	}
@@ -54,6 +58,7 @@ func sendRequest(url string, timestamp float64) {
 	logger.Info("Request sent",
 		zap.Int("status_code", resp.StatusCode),
 		zap.Float64("timestamp", timestamp),
+		zap.String("file_name", fileName),
 	)
 }
 
@@ -93,7 +98,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for req := range requests {
-				sendRequest(targetURL, req.Timestamp)
+				sendRequest(targetURL, req.Timestamp, req.FileName)
 				wg.Done()
 			}
 		}()
@@ -103,10 +108,12 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 
 	simulationMu.Lock()
 	simulationRun = true
+	simulationState = "STARTING"
 	simulationMu.Unlock()
 	defer func() {
 		simulationMu.Lock()
 		simulationRun = false
+		simulationState = "STOPPED"
 		simulationMu.Unlock()
 	}()
 
@@ -136,7 +143,11 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 		}
 
 		if len(newFiles) > 0 {
-			logger.Info("New trace files detected", zap.Int("count", len(newFiles)))
+			simulationMu.Lock()
+			simulationState = "RUNNING"
+			simulationMu.Unlock()
+
+			logger.Info("New trace files detected, processing batch.", zap.Int("count", len(newFiles)))
 
 			sort.Slice(newFiles, func(i, j int) bool {
 				tsI, _ := strconv.ParseInt(strings.TrimSuffix(newFiles[i].Name(), ".trace"), 10, 64)
@@ -145,7 +156,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 			})
 
 			for _, fileEntry := range newFiles {
-				filePath := fmt.Sprintf("%s/%s", traceDirPath, fileEntry.Name())
+				filePath := filepath.Join(traceDirPath, fileEntry.Name())
 				logger.Info("Processing new trace file", zap.String("file", filePath))
 
 				file, err := os.Open(filePath)
@@ -233,7 +244,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 
 					if sampleRequest(reductionPermil) {
 						wg.Add(1)
-						requests <- Request{Timestamp: ts}
+						requests <- Request{Timestamp: ts, FileName: fileEntry.Name()}
 					}
 				}
 				file.Close()
@@ -241,11 +252,13 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 				logger.Info("Finished processing file", zap.String("file", filePath))
 			}
 		} else {
-			logger.Info("No new trace files found, waiting for next poll.")
-		}
+			simulationMu.Lock()
+			simulationState = "IDLE"
+			simulationMu.Unlock()
 
-		logger.Info("Waiting for next polling cycle", zap.Int("minutes", pollIntervalMinutes))
-		time.Sleep(time.Duration(pollIntervalMinutes) * time.Minute)
+			logger.Info("No new trace files found, waiting for next poll.")
+			time.Sleep(time.Duration(pollIntervalMinutes) * time.Minute)
+		}
 	}
 
 end_simulation:
@@ -328,6 +341,7 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	simulationState = "STOPPING"
 	close(stopChan)
 	simulationMu.Unlock()
 
@@ -335,6 +349,20 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Simulation stopped"))
+}
+
+func statusHandler(w http.ResponseWriter, r *http.Request) {
+	simulationMu.Lock()
+	defer simulationMu.Unlock()
+
+	state := simulationState
+	if !simulationRun && state == "" {
+		state = "STOPPED"
+	}
+
+	response := fmt.Sprintf(`{"status": "%s"}`, state)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(response))
 }
 
 func init() {
@@ -352,6 +380,7 @@ func main() {
 
 	http.HandleFunc("/start", startHandler)
 	http.HandleFunc("/stop", stopHandler)
+	http.HandleFunc("/status", statusHandler)
 	logger.Info("Server started on port 8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		logger.Fatal("Failed to start server", zap.Error(err))
