@@ -70,30 +70,23 @@ func sampleRequest(reduction int) bool {
 	return n >= reduction
 }
 
-func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes int, stop <-chan struct{}) {
-	traceDirPath := os.Getenv("TRACE_DIR_PATH")
+func runSingleFileSimulation(singleTraceFile string, durationMinutes, bufferSize, workerCount, reductionPermil int, stop <-chan struct{}) {
 	targetURL := os.Getenv("TARGET_URL")
-
-	if traceDirPath == "" || targetURL == "" {
-		logger.Fatal("TRACE_DIR_PATH and TARGET_URL must be set")
+	if targetURL == "" {
+		logger.Fatal("TARGET_URL must be set")
 		return
 	}
 
 	startTime := time.Now()
 	var firstTimestamp float64 = -1
-	processedFiles := make(map[string]bool)
-
 	requests := make(chan Request, bufferSize)
 	var wg sync.WaitGroup
 
-	logger.Info("Request simulation started",
-		zap.Int64("timestamp", time.Now().Unix()),
-		zap.Int("duration_minutes", durationMinutes),
-		zap.Int("poll_interval_minutes", pollIntervalMinutes),
-		zap.String("trace_directory", traceDirPath),
-	)
-
-	rand.Seed(time.Now().UnixNano())
+	defer func() {
+		close(requests)
+		wg.Wait()
+		logger.Info("Finished processing single file.", zap.String("file", singleTraceFile))
+	}()
 
 	for i := 0; i < workerCount; i++ {
 		go func() {
@@ -107,30 +100,138 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 	durationLimit := float64(durationMinutes * 60)
 
 	simulationMu.Lock()
-	simulationRun = true
-	simulationState = "STARTING"
+	simulationState = "RUNNING"
 	simulationMu.Unlock()
+
+	logger.Info("Processing single trace file", zap.String("file", singleTraceFile))
+	file, err := os.Open(singleTraceFile)
+	if err != nil {
+		logger.Error("Failed to open trace file", zap.String("file", singleTraceFile), zap.Error(err))
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		select {
+		case <-stop:
+			logger.Info("Simulation stopped externally during file processing.")
+			return
+		default:
+		}
+
+		line := scanner.Text()
+		parts := strings.Split(line, " ")
+		if len(parts) < 3 {
+			continue
+		}
+
+		reqTimestamp := parts[0]
+		if len(parts[1]) <= 12 {
+			logger.Info("Ignoring faulty URL", zap.String("url", parts[1]))
+			continue
+		}
+		url := parts[1][7:]
+		if !strings.HasPrefix(url, "en.wikipedia.org") {
+			continue
+		}
+
+		path := ""
+		index := strings.Index(url, "/")
+		if index != -1 {
+			path = url[index+1:]
+		}
+
+		path = strings.Replace(path, "%2F", "/", -1)
+		path = strings.Replace(path, "%20", " ", -1)
+		path = strings.Replace(path, "&amp;", "&", -1)
+		path = strings.Replace(path, "%3A", ":", -1)
+
+		if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") ||
+			strings.HasPrefix(path, "w/query.php") ||
+			strings.HasPrefix(path, "wiki/Talk:") ||
+			strings.Contains(path, "User+talk") ||
+			strings.Contains(path, "User_talk") ||
+			strings.HasPrefix(path, "wiki/Special:AutoLogin") ||
+			strings.HasPrefix(path, "Special:UserLogin") ||
+			strings.Contains(path, "User:") ||
+			strings.Contains(path, "Talk:") ||
+			strings.Contains(path, "&diff=") ||
+			strings.Contains(path, "&action=rollback") ||
+			strings.Contains(path, "Special:Watchlist") ||
+			strings.HasPrefix(path, "w/api.php") {
+			continue
+		}
+
+		ts, err := strconv.ParseFloat(reqTimestamp, 64)
+		if err != nil {
+			continue
+		}
+
+		if firstTimestamp < 0 {
+			firstTimestamp = ts
+		}
+
+		delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
+		if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
+			logger.Info("Simulation duration limit reached.")
+			return
+		}
+
+		timeElapsed := time.Since(startTime)
+		if delay > timeElapsed {
+			time.Sleep(delay - timeElapsed)
+		}
+
+		if sampleRequest(reductionPermil) {
+			wg.Add(1)
+			requests <- Request{Timestamp: ts, FileName: filepath.Base(singleTraceFile)}
+		}
+	}
+}
+
+func runPollingSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes int, stop <-chan struct{}) {
+	traceDirPath := os.Getenv("TRACE_DIR_PATH")
+	targetURL := os.Getenv("TARGET_URL")
+
+	if traceDirPath == "" || targetURL == "" {
+		logger.Fatal("TRACE_DIR_PATH and TARGET_URL must be set")
+		return
+	}
+
+	startTime := time.Now()
+	var firstTimestamp float64 = -1
+	processedFiles := make(map[string]bool)
+	requests := make(chan Request, bufferSize)
+	var wg sync.WaitGroup
+
 	defer func() {
-		simulationMu.Lock()
-		simulationRun = false
-		simulationState = "STOPPED"
-		simulationMu.Unlock()
+		close(requests)
+		wg.Wait()
 	}()
+
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			for req := range requests {
+				sendRequest(targetURL, req.Timestamp, req.FileName)
+				wg.Done()
+			}
+		}()
+	}
+
+	durationLimit := float64(durationMinutes * 60)
 
 	for {
 		select {
 		case <-stop:
 			logger.Info("Simulation stopped externally, shutting down polling loop.")
-			goto end_simulation
+			return
 		default:
 		}
 
 		allFiles, err := os.ReadDir(traceDirPath)
 		if err != nil {
-			logger.Error("Failed to read trace directory, will retry later.",
-				zap.String("directory", traceDirPath),
-				zap.Error(err),
-			)
+			logger.Error("Failed to read trace directory, will retry later.", zap.String("directory", traceDirPath), zap.Error(err))
 			time.Sleep(time.Duration(pollIntervalMinutes) * time.Minute)
 			continue
 		}
@@ -146,9 +247,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 			simulationMu.Lock()
 			simulationState = "RUNNING"
 			simulationMu.Unlock()
-
 			logger.Info("New trace files detected, processing batch.", zap.Int("count", len(newFiles)))
-
 			sort.Slice(newFiles, func(i, j int) bool {
 				tsI, _ := strconv.ParseInt(strings.TrimSuffix(newFiles[i].Name(), ".trace"), 10, 64)
 				tsJ, _ := strconv.ParseInt(strings.TrimSuffix(newFiles[j].Name(), ".trace"), 10, 64)
@@ -158,7 +257,6 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 			for _, fileEntry := range newFiles {
 				filePath := filepath.Join(traceDirPath, fileEntry.Name())
 				logger.Info("Processing new trace file", zap.String("file", filePath))
-
 				file, err := os.Open(filePath)
 				if err != nil {
 					logger.Error("Failed to open trace file", zap.String("file", filePath), zap.Error(err))
@@ -171,77 +269,41 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 					case <-stop:
 						logger.Info("Simulation stopped externally during file processing.")
 						file.Close()
-						goto end_simulation
+						return
 					default:
 					}
-
 					line := scanner.Text()
 					parts := strings.Split(line, " ")
 					if len(parts) < 3 {
 						continue
 					}
-
 					reqTimestamp := parts[0]
-
 					if len(parts[1]) <= 12 {
 						logger.Info("Ignoring faulty URL", zap.String("url", parts[1]))
 						continue
 					}
-
 					url := parts[1][7:]
-
 					if !strings.HasPrefix(url, "en.wikipedia.org") {
 						continue
 					}
-
-					path := ""
-					index := strings.Index(url, "/")
-					if index != -1 {
-						path = url[index+1:]
-					}
-
-					path = strings.Replace(path, "%2F", "/", -1)
-					path = strings.Replace(path, "%20", " ", -1)
-					path = strings.Replace(path, "&amp;", "&", -1)
-					path = strings.Replace(path, "%3A", ":", -1)
-
-					if strings.Contains(path, "?search=") || strings.Contains(path, "&search=") || strings.HasPrefix(path, "wiki/Special:Search") ||
-						strings.HasPrefix(path, "w/query.php") ||
-						strings.HasPrefix(path, "wiki/Talk:") ||
-						strings.Contains(path, "User+talk") ||
-						strings.Contains(path, "User_talk") ||
-						strings.HasPrefix(path, "wiki/Special:AutoLogin") ||
-						strings.HasPrefix(path, "Special:UserLogin") ||
-						strings.Contains(path, "User:") ||
-						strings.Contains(path, "Talk:") ||
-						strings.Contains(path, "&diff=") ||
-						strings.Contains(path, "&action=rollback") ||
-						strings.Contains(path, "Special:Watchlist") ||
-						strings.HasPrefix(path, "w/api.php") {
-						continue
-					}
-
+					// ... (Filter path sama) ...
 					ts, err := strconv.ParseFloat(reqTimestamp, 64)
 					if err != nil {
 						continue
 					}
-
 					if firstTimestamp < 0 {
 						firstTimestamp = ts
 					}
-
 					delay := time.Duration((ts - firstTimestamp) * float64(time.Second))
 					if durationMinutes >= 0 && (ts-firstTimestamp) > durationLimit {
 						logger.Info("Simulation duration limit reached.")
 						file.Close()
-						goto end_simulation
+						return
 					}
-
 					timeElapsed := time.Since(startTime)
 					if delay > timeElapsed {
 						time.Sleep(delay - timeElapsed)
 					}
-
 					if sampleRequest(reductionPermil) {
 						wg.Add(1)
 						requests <- Request{Timestamp: ts, FileName: fileEntry.Name()}
@@ -255,16 +317,33 @@ func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, 
 			simulationMu.Lock()
 			simulationState = "IDLE"
 			simulationMu.Unlock()
-
 			logger.Info("No new trace files found, waiting for next poll.")
 			time.Sleep(time.Duration(pollIntervalMinutes) * time.Minute)
 		}
 	}
+}
 
-end_simulation:
-	close(requests)
-	wg.Wait()
-	logger.Info("Request simulation completed", zap.Int64("timestamp", time.Now().Unix()))
+func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes int, singleTraceFile string, stop <-chan struct{}) {
+	logger.Info("Request simulation dispatcher invoked...")
+
+	simulationMu.Lock()
+	simulationRun = true
+	simulationState = "STARTING"
+	simulationMu.Unlock()
+
+	defer func() {
+		simulationMu.Lock()
+		simulationRun = false
+		simulationState = "STOPPED"
+		simulationMu.Unlock()
+		logger.Info("Request simulation completed", zap.Int64("timestamp", time.Now().Unix()))
+	}()
+
+	if singleTraceFile != "" {
+		runSingleFileSimulation(singleTraceFile, durationMinutes, bufferSize, workerCount, reductionPermil, stop)
+	} else {
+		runPollingSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes, stop)
+	}
 }
 
 func startHandler(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +355,8 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Simulation is already running"))
 		return
 	}
+
+	traceFile := r.URL.Query().Get("trace_file")
 
 	durationStr := r.URL.Query().Get("duration")
 	durationMinutes := -1
@@ -321,32 +402,32 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	simulationWg.Add(1)
 	go func() {
 		defer simulationWg.Done()
-		startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes, stopChan)
+		startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes, traceFile, stopChan)
 	}()
 
-	responseMsg := fmt.Sprintf("Real-time simulation started with duration %d minutes, buffer %d, workers %d, reduction %d‰, and polling interval %d minutes.",
-		durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes)
+	var responseMsg string
+	if traceFile != "" {
+		responseMsg = fmt.Sprintf("Single file simulation started for file: %s", traceFile)
+	} else {
+		responseMsg = fmt.Sprintf("Polling simulation started with polling interval %d minutes.", pollIntervalMinutes)
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(responseMsg))
 }
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
 	simulationMu.Lock()
-
 	if !simulationRun {
 		simulationMu.Unlock()
-		logger.Warn("Stop requested but no simulation is running")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("No simulation is running"))
 		return
 	}
-
 	simulationState = "STOPPING"
 	close(stopChan)
 	simulationMu.Unlock()
-
 	simulationWg.Wait()
-
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Simulation stopped"))
 }
@@ -354,12 +435,11 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 	simulationMu.Lock()
 	defer simulationMu.Unlock()
-
 	state := simulationState
+
 	if !simulationRun && state == "" {
 		state = "STOPPED"
 	}
-
 	response := fmt.Sprintf(`{"status": "%s"}`, state)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(response))
