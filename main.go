@@ -70,12 +70,16 @@ func sampleRequest(reduction int) bool {
 	return n >= reduction
 }
 
-func runSingleFileSimulation(singleTraceFile string, durationMinutes, bufferSize, workerCount, reductionPermil int, stop <-chan struct{}) {
+func runSingleFileSimulation(fileName string, durationMinutes, bufferSize, workerCount, reductionPermil int, stop <-chan struct{}) {
+	traceDirPath := os.Getenv("TRACE_DIR_PATH")
 	targetURL := os.Getenv("TARGET_URL")
-	if targetURL == "" {
-		logger.Fatal("TARGET_URL must be set")
+
+	if traceDirPath == "" || targetURL == "" {
+		logger.Fatal("TRACE_DIR_PATH and TARGET_URL must be set")
 		return
 	}
+
+	fullPath := filepath.Join(traceDirPath, fileName)
 
 	startTime := time.Now()
 	var firstTimestamp float64 = -1
@@ -85,7 +89,7 @@ func runSingleFileSimulation(singleTraceFile string, durationMinutes, bufferSize
 	defer func() {
 		close(requests)
 		wg.Wait()
-		logger.Info("Finished processing single file.", zap.String("file", singleTraceFile))
+		logger.Info("Finished processing single file.", zap.String("file", fullPath))
 	}()
 
 	for i := 0; i < workerCount; i++ {
@@ -103,10 +107,10 @@ func runSingleFileSimulation(singleTraceFile string, durationMinutes, bufferSize
 	simulationState = "RUNNING"
 	simulationMu.Unlock()
 
-	logger.Info("Processing single trace file", zap.String("file", singleTraceFile))
-	file, err := os.Open(singleTraceFile)
+	logger.Info("Processing single trace file", zap.String("file", fullPath))
+	file, err := os.Open(fullPath)
 	if err != nil {
-		logger.Error("Failed to open trace file", zap.String("file", singleTraceFile), zap.Error(err))
+		logger.Error("Failed to open trace file", zap.String("file", fullPath), zap.Error(err))
 		return
 	}
 	defer file.Close()
@@ -185,7 +189,7 @@ func runSingleFileSimulation(singleTraceFile string, durationMinutes, bufferSize
 
 		if sampleRequest(reductionPermil) {
 			wg.Add(1)
-			requests <- Request{Timestamp: ts, FileName: filepath.Base(singleTraceFile)}
+			requests <- Request{Timestamp: ts, FileName: fileName}
 		}
 	}
 }
@@ -286,7 +290,6 @@ func runPollingSimulation(durationMinutes, bufferSize, workerCount, reductionPer
 					if !strings.HasPrefix(url, "en.wikipedia.org") {
 						continue
 					}
-					// ... (Filter path sama) ...
 					ts, err := strconv.ParseFloat(reqTimestamp, 64)
 					if err != nil {
 						continue
@@ -436,7 +439,6 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	simulationMu.Lock()
 	defer simulationMu.Unlock()
 	state := simulationState
-
 	if !simulationRun && state == "" {
 		state = "STOPPED"
 	}
