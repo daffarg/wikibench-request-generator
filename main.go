@@ -327,7 +327,14 @@ func runPollingSimulation(durationMinutes, bufferSize, workerCount, reductionPer
 }
 
 func startSimulation(durationMinutes, bufferSize, workerCount, reductionPermil, pollIntervalMinutes int, singleTraceFile string, stop <-chan struct{}) {
-	logger.Info("Request simulation dispatcher invoked...")
+	logger.Info("Request simulation dispatcher invoked...",
+		zap.Int("duration_minutes", durationMinutes),
+		zap.Int("buffer_size", bufferSize),
+		zap.Int("worker_count", workerCount),
+		zap.Int("reduction_permil", reductionPermil),
+		zap.Int("poll_interval_minutes", pollIntervalMinutes),
+		zap.String("single_trace_file", singleTraceFile),
+	)
 
 	simulationMu.Lock()
 	simulationRun = true
