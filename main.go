@@ -72,7 +72,7 @@ func sampleRequest(reduction int) bool {
 	return rand.Intn(1000) >= reduction
 }
 
-func processLine(line, fileName string, startTime time.Time, firstTimestamp float64, durationLimit float64, reduction int, wg *sync.WaitGroup, requests chan<- Request) (float64, bool) {
+func processLine(line, fileName string, startTime time.Time, firstTimestamp float64, durationLimit float64, reduction int, wg *sync.WaitGroup, requests chan<- Request, stop <-chan struct{}) (float64, bool) {
 	parts := strings.Split(line, " ")
 	if len(parts) < 3 {
 		return firstTimestamp, false
@@ -133,7 +133,15 @@ func processLine(line, fileName string, startTime time.Time, firstTimestamp floa
 
 	timeElapsed := time.Since(startTime)
 	if delay > timeElapsed {
-		time.Sleep(delay - timeElapsed)
+		sleepDuration := delay - timeElapsed
+		sleepTimer := time.NewTimer(sleepDuration)
+		select {
+		case <-stop:
+			logger.Info("Stop signal received during delay sleep.")
+			sleepTimer.Stop()
+			return firstTimestamp, true
+		case <-sleepTimer.C:
+		}
 	}
 
 	if sampleRequest(reduction) {
@@ -199,10 +207,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalM
 		durationLimit = float64(durationMinutes * 60)
 	}
 
-	// --- PEMISAHAN LOGIKA UTAMA ---
-
 	if singleTraceFile != "" {
-		// --- LOGIKA UNTUK MODE FILE TUNGGAL ---
 		simulationMu.Lock()
 		simulationState = "RUNNING"
 		simulationMu.Unlock()
@@ -251,7 +256,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalM
 				}
 
 				var shouldStop bool
-				firstTimestamp, shouldStop = processLine(scanner.Text(), singleTraceFile, startTime, firstTimestamp, durationLimit, randReduction, &wg, requests)
+				firstTimestamp, shouldStop = processLine(scanner.Text(), singleTraceFile, startTime, firstTimestamp, durationLimit, randReduction, &wg, requests, stop)
 				if shouldStop {
 					return
 				}
@@ -261,7 +266,6 @@ func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalM
 		logger.Info("All phases completed for single file.")
 
 	} else {
-		// --- LOGIKA UNTUK MODE POLLING (beberapa file) ---
 		currentPhaseIndex := 0
 		processedFiles := make(map[string]bool)
 		for {
@@ -319,7 +323,7 @@ func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalM
 						return
 					default:
 					}
-					firstTimestamp, _ = processLine(scanner.Text(), fileEntry.Name(), startTime, firstTimestamp, durationLimit, currentPhase.ReductionPermilMin, &wg, requests)
+					firstTimestamp, _ = processLine(scanner.Text(), fileEntry.Name(), startTime, firstTimestamp, durationLimit, currentPhase.ReductionPermilMin, &wg, requests, stop)
 				}
 				file.Close()
 
