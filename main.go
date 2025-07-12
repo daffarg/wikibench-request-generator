@@ -339,18 +339,28 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 	}
 }
 
-func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalMinutes int, singleTraceFile string, stop <-chan struct{}) {
+func startSimulation(
+	durationMinutes, bufferSize, workerCount int,
+	pollIntervalMinutes int, singleTraceFile string,
+	stop <-chan struct{},
+) {
 	requests := make(chan Request, bufferSize)
 	var wg sync.WaitGroup
+
 	defer func() {
 		close(requests)
 		wg.Wait()
+		simulationMu.Lock()
+		simulationRun = false
+		simulationState = "STOPPED"
+		simulationMu.Unlock()
+		logger.Info("Request simulation completed", zap.Int64("timestamp", time.Now().Unix()))
 	}()
+
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for req := range requests {
-				targetURL := os.Getenv("TARGET_URL")
-				sendRequest(targetURL, req.Timestamp, req.FileName)
+				sendRequest(os.Getenv("TARGET_URL"), req.Timestamp, req.FileName)
 				wg.Done()
 			}
 		}()
@@ -363,12 +373,12 @@ func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalM
 	}
 	var trafficSchedule []TrafficPhase
 	scheduleFilePath := filepath.Join(traceDirPath, "schedule.json")
-	scheduleFileContent, err := os.ReadFile(scheduleFilePath)
+	content, err := os.ReadFile(scheduleFilePath)
 	if err != nil {
-		logger.Fatal("schedule.json not found or failed to read.", zap.Error(err), zap.String("path", scheduleFilePath))
+		logger.Fatal("schedule.json not found or failed to read.", zap.Error(err))
 		return
 	}
-	if err := json.Unmarshal(scheduleFileContent, &trafficSchedule); err != nil {
+	if err := json.Unmarshal(content, &trafficSchedule); err != nil {
 		logger.Fatal("Failed to parse schedule.json", zap.Error(err))
 		return
 	}
@@ -378,13 +388,6 @@ func startSimulation(durationMinutes, bufferSize, workerCount int, pollIntervalM
 	simulationRun = true
 	simulationState = "STARTING"
 	simulationMu.Unlock()
-	defer func() {
-		simulationMu.Lock()
-		simulationRun = false
-		simulationState = "STOPPED"
-		simulationMu.Unlock()
-		logger.Info("Request simulation completed", zap.Int64("timestamp", time.Now().Unix()))
-	}()
 
 	startTime := time.Now()
 	durationLimit := -1.0
