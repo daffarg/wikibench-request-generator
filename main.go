@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -140,7 +141,7 @@ func processLine(line, fileName string, startTime time.Time, firstTimestamp floa
 	return firstTimestamp, false
 }
 
-func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit float64, trafficSchedule []TrafficPhase, wg *sync.WaitGroup, requests chan<- Request, stop <-chan struct{}) {
+func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit float64, trafficSchedule []TrafficPhase, wg *sync.WaitGroup, requests chan<- Request, stop <-chan struct{}, infoPhase string) {
 	traceDirPath := os.Getenv("TRACE_DIR_PATH")
 	fullPath := filepath.Join(traceDirPath, fileName)
 	file, err := os.Open(fullPath)
@@ -159,6 +160,16 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 	var currentPhase TrafficPhase
 	var firstTimestamp float64 = -1
 
+	// For info_phase tracking
+	var phaseStartMs int64
+	var phaseReduction int
+	var phaseDuration time.Duration
+
+	logger.Info("Starting single file simulation",
+		zap.String("file", fileName),
+		zap.Int("total_phases", len(trafficSchedule)),
+	)
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		select {
@@ -168,32 +179,75 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 		default:
 		}
 
+		// detect phase boundary
 		if time.Now().After(phaseEndTime) {
+			// send info for previous phase
+			if infoPhase == "true" && currentPhaseIndex >= 0 {
+				// wait until requests channel is drained
+				for len(requests) > 0 {
+					time.Sleep(5 * time.Second)
+					logger.Info("Waiting for requests to drain before sending phase info",
+						zap.Int("remaining_requests", len(requests)),
+						zap.String("phase", currentPhase.PhaseName),
+					)
+				}
+				endMs := time.Now().Unix() - 25200 // adjust for UTC+7
+
+				payload := map[string]interface{}{
+					"start_timestamp":  phaseStartMs,
+					"end_timestamp":    endMs,
+					"phase_name":       currentPhase.PhaseName,
+					"reduction":        phaseReduction,
+					"duration_minutes": int(phaseDuration / 60),
+				}
+
+				// send POST to /single/phase
+				host := os.Getenv("EVAL_HOST")
+				bts, _ := json.Marshal(payload)
+				req, _ := http.NewRequest("POST", fmt.Sprintf("%s/single/phase", host), bytes.NewReader(bts))
+				req.Header.Set("Content-Type", "application/json")
+				cli := &http.Client{Timeout: 10 * time.Second}
+				resp, err := cli.Do(req)
+				if err != nil {
+					logger.Error("Failed to send phase info",
+						zap.String("host", host),
+						zap.String("phase", currentPhase.PhaseName),
+						zap.Error(err),
+					)
+				} else {
+					resp.Body.Close()
+					logger.Info("Phase info sent", zap.String("phase", currentPhase.PhaseName))
+				}
+				time.Sleep(5 * time.Second)
+			}
+
+			// start next phase
 			currentPhaseIndex++
 			if currentPhaseIndex >= len(trafficSchedule) {
 				logger.Info("All schedule phases completed for single file.")
 				break
 			}
 			currentPhase = trafficSchedule[currentPhaseIndex]
-
+			// randomize reduction & duration
 			randDuration := time.Duration(currentPhase.DurationMinutesMin) * time.Minute
 			if currentPhase.DurationMinutesMax > currentPhase.DurationMinutesMin {
 				randDuration += time.Duration(rand.Intn(currentPhase.DurationMinutesMax-currentPhase.DurationMinutesMin+1)) * time.Minute
 			}
-			phaseEndTime = time.Now().Add(randDuration)
-			logger.Info("Entering new traffic phase", zap.String("phase", currentPhase.PhaseName), zap.Duration("duration", randDuration))
+			phaseDuration = randDuration
+			phaseEndTime = time.Now().Add(phaseDuration)
+			phaseStartMs = time.Now().Unix() - 25200 // adjust for UTC+7
+			randRed := currentPhase.ReductionPermilMin
+			if currentPhase.ReductionPermilMax > randRed {
+				randRed += rand.Intn(currentPhase.ReductionPermilMax - currentPhase.ReductionPermilMin + 1)
+			}
+			phaseReduction = randRed
+
+			logger.Info("Entering new traffic phase", zap.String("phase", currentPhase.PhaseName), zap.Duration("duration", phaseDuration))
 		}
 
-		randReduction := currentPhase.ReductionPermilMin
-		if currentPhase.ReductionPermilMax > currentPhase.ReductionPermilMin {
-			randReduction += rand.Intn(currentPhase.ReductionPermilMax - currentPhase.ReductionPermilMin + 1)
-		}
-
-		var shouldStop bool
-		firstTimestamp, shouldStop = processLine(scanner.Text(), fileName, startTime, firstTimestamp, durationLimit, randReduction, wg, requests, stop)
-		if shouldStop {
-			return
-		}
+		randReduction := phaseReduction
+		firstTimestamp, _ = processLine(scanner.Text(), fileName, startTime, firstTimestamp, durationLimit, randReduction, wg, requests, stop)
+		// continue to next line
 	}
 	logger.Info("Finished processing single file based on schedule.")
 }
@@ -341,7 +395,7 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 
 func startSimulation(
 	durationMinutes, bufferSize, workerCount int,
-	pollIntervalMinutes int, singleTraceFile string,
+	pollIntervalMinutes int, infoPhase, singleTraceFile string,
 	stop <-chan struct{},
 ) {
 	requests := make(chan Request, bufferSize)
@@ -396,7 +450,7 @@ func startSimulation(
 	}
 
 	if singleTraceFile != "" {
-		runSingleFileSimulation(singleTraceFile, startTime, durationLimit, trafficSchedule, &wg, requests, stop)
+		runSingleFileSimulation(singleTraceFile, startTime, durationLimit, trafficSchedule, &wg, requests, stop, infoPhase)
 	} else {
 		runPollingSimulation(durationLimit, pollIntervalMinutes, trafficSchedule, &wg, requests, stop)
 	}
@@ -412,6 +466,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	traceFile := r.URL.Query().Get("trace_file")
+	infoPhase := r.URL.Query().Get("info_phase")
 	durationStr := r.URL.Query().Get("duration")
 	durationMinutes := -1
 	if durationStr != "" {
@@ -445,7 +500,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 	simulationWg.Add(1)
 	go func() {
 		defer simulationWg.Done()
-		startSimulation(durationMinutes, bufferSize, workerCount, pollIntervalMinutes, traceFile, stopChan)
+		startSimulation(durationMinutes, bufferSize, workerCount, pollIntervalMinutes, infoPhase, traceFile, stopChan)
 	}()
 
 	var responseMsg string
