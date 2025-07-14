@@ -5,7 +5,7 @@ metadata:
 data:
   TRACE_DIR_PATH: "./../mnt/trace/"
   TARGET_URL: "http://productpage.default.svc.cluster.local:9080/productpage?u=normal"
-  EVAL_HOST: "http://host.docker.internal:8080"
+  EVAL_HOST: "host.docker.internal:8080"
 
 ---
 
