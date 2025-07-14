@@ -194,11 +194,11 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 				endMs := time.Now().Unix() - 25200 // adjust for UTC+7
 
 				payload := map[string]interface{}{
-					"start_timestamp":  phaseStartMs,
-					"end_timestamp":    endMs,
-					"phase_name":       currentPhase.PhaseName,
-					"reduction":        phaseReduction,
-					"duration_minutes": int(phaseDuration / 60),
+					"start_timestamp": phaseStartMs,
+					"end_timestamp":   endMs,
+					"phase_name":      currentPhase.PhaseName,
+					"reduction":       phaseReduction,
+					"duration":        phaseDuration.Minutes(),
 				}
 
 				// send POST to /single/phase
