@@ -191,7 +191,7 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 						zap.String("phase", currentPhase.PhaseName),
 					)
 				}
-				endMs := time.Now().Unix() - 25200 // adjust for UTC+7
+				endMs := time.Now().Unix()
 
 				payload := map[string]interface{}{
 					"start_timestamp": phaseStartMs,
@@ -235,7 +235,7 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 			}
 			phaseDuration = randDuration
 			phaseEndTime = time.Now().Add(phaseDuration)
-			phaseStartMs = time.Now().Unix() - 25200 // adjust for UTC+7
+			phaseStartMs = time.Now().Unix()
 			randRed := currentPhase.ReductionPermilMin
 			if currentPhase.ReductionPermilMax > randRed {
 				randRed += rand.Intn(currentPhase.ReductionPermilMax - currentPhase.ReductionPermilMin + 1)
