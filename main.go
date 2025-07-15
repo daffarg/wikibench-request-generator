@@ -191,6 +191,13 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 						zap.String("phase", currentPhase.PhaseName),
 					)
 				}
+
+				logger.Info("Sleeping for 1 minutes after completing a phase",
+					zap.String("phase", currentPhase.PhaseName),
+				)
+
+				time.Sleep(60 * time.Second)
+
 				endMs := time.Now().Unix()
 
 				payload := map[string]interface{}{
