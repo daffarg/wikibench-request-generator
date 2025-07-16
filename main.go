@@ -256,7 +256,38 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 		firstTimestamp, _ = processLine(scanner.Text(), fileName, startTime, firstTimestamp, durationLimit, randReduction, wg, requests, stop)
 		// continue to next line
 	}
-	logger.Info("Finished processing single file based on schedule.")
+	logger.Info("Finished processing single file based on schedule. Sending the info.")
+
+	time.Sleep(60 * time.Second)
+
+	endTimestamp := time.Now().Unix()
+
+	payload := map[string]interface{}{
+		"start_timestamp": startTime.Unix(),
+		"end_timestamp":   endTimestamp,
+	}
+
+	host := os.Getenv("EVAL_HOST")
+	bts, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/single", host), bytes.NewReader(bts))
+	req.Header.Set("Content-Type", "application/json")
+	cli := &http.Client{Timeout: 10 * time.Second}
+	resp, err := cli.Do(req)
+	if err != nil {
+		logger.Error("Failed to send simulation completed info",
+			zap.String("host", host),
+			zap.Int64("start_timestamp", startTime.Unix()),
+			zap.Int64("end_timestamp", endTimestamp),
+			zap.Error(err),
+		)
+	} else {
+		resp.Body.Close()
+		logger.Info("Simulation info sent",
+			zap.String("host", host),
+			zap.Int64("start_timestamp", startTime.Unix()),
+			zap.Int64("end_timestamp", endTimestamp),
+		)
+	}
 }
 
 func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, trafficSchedule []TrafficPhase, wg *sync.WaitGroup, requests chan<- Request, stop <-chan struct{}) {
