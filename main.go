@@ -128,7 +128,6 @@ func processLine(line, fileName string, startTime time.Time, firstTimestamp floa
 		sleepTimer := time.NewTimer(sleepDuration)
 		select {
 		case <-stop:
-			logger.Info("Stop signal received during delay sleep.")
 			sleepTimer.Stop()
 			return firstTimestamp, true
 		case <-sleepTimer.C:
@@ -357,7 +356,7 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 			fileName := entry.Name()
 			filePath := filepath.Join(traceDirPath, fileName)
 
-			logger.Info("Processing trace file under current phase",
+			logger.Info("Processing new trace file under current phase",
 				zap.String("file", fileName), zap.String("phase", trafficSchedule[currentPhaseIndex].PhaseName), zap.Time("until", phaseEndTime))
 
 			f, err := os.Open(filePath)
