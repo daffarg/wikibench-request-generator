@@ -299,6 +299,9 @@ func runPollingSimulation(
 ) {
 	traceDirPath := os.Getenv("TRACE_DIR_PATH")
 
+	// Start global simulation startTime for replay delay
+	simStart := time.Now()
+
 	// Global phase control variables
 	currentPhaseIndex := 0
 	var phase TrafficPhase
@@ -395,21 +398,20 @@ func runPollingSimulation(
 				firstTs = -1
 			}
 
-			// Scan entire file, rotating phase as needed
+			// Scan entire file, rotating phase as needed and replaying delay
 			for scanner.Scan() {
-				now := time.Now()
-				if now.After(phaseEndTime) {
-					// Rotate phase mid-file
-					logger.Info("Phase end time reached in mid-file, rotating phase",
-						zap.String("phase", phase.PhaseName),
-						zap.String("file", fileName),
+				// Rotate phase if needed
+				if time.Now().After(phaseEndTime) {
+					logger.Info("Phase end time reached mid-file, rotating phase",
+						zap.String("phase", phase.PhaseName), zap.String("file", fileName),
 					)
 					currentPhaseIndex = (currentPhaseIndex + 1) % len(trafficSchedule)
 					startPhase()
 				}
 				line := scanner.Text()
+				// Replay timing based on simStart and trace timestamps
 				firstTs, _ = processLine(
-					line, fileName, now, firstTs, durationLimit,
+					line, fileName, simStart, firstTs, durationLimit,
 					phaseReduction, wg, requests, stop,
 				)
 			}
@@ -422,18 +424,16 @@ func runPollingSimulation(
 				zap.String("file", fileName), zap.String("phase", phase.PhaseName),
 			)
 
-			// After file, if phaseEndTime passed, rotate phase
+			// After file, rotate phase if expired
 			if time.Now().After(phaseEndTime) {
 				logger.Info("File completed and phase end time reached, rotating phase",
-					zap.String("phase", phase.PhaseName),
-					zap.String("file", fileName),
+					zap.String("phase", phase.PhaseName), zap.String("file", fileName),
 				)
 				currentPhaseIndex = (currentPhaseIndex + 1) % len(trafficSchedule)
 				startPhase()
 			} else {
-				logger.Info("File completed but the phase has not end yet, continuing the phase in the next file",
-					zap.String("phase", phase.PhaseName),
-					zap.String("file", fileName),
+				logger.Info("File completed and phase still running, continuing phase",
+					zap.String("phase", phase.PhaseName), zap.String("file", fileName),
 				)
 			}
 		}
