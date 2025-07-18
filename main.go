@@ -289,11 +289,23 @@ func runSingleFileSimulation(fileName string, startTime time.Time, durationLimit
 	}
 }
 
-func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, trafficSchedule []TrafficPhase, wg *sync.WaitGroup, requests chan<- Request, stop <-chan struct{}) {
+func runPollingSimulation(
+	durationLimit float64,
+	pollIntervalMinutes int,
+	trafficSchedule []TrafficPhase,
+	wg *sync.WaitGroup,
+	requests chan<- Request,
+	stop <-chan struct{},
+) {
 	traceDirPath := os.Getenv("TRACE_DIR_PATH")
-	// Global phase control
+
+	// Global phase control variables
 	currentPhaseIndex := 0
-	// Randomize initial phase duration
+	var phase TrafficPhase
+	var phaseEndTime time.Time
+	var phaseReduction int
+
+	// Helper: random duration and reduction per phase
 	getRandDuration := func(p TrafficPhase) time.Duration {
 		d := time.Duration(p.DurationMinutesMin) * time.Minute
 		if p.DurationMinutesMax > p.DurationMinutesMin {
@@ -301,13 +313,25 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 		}
 		return d
 	}
-	phase := trafficSchedule[currentPhaseIndex]
-	phaseEndTime := time.Now().Add(getRandDuration(phase))
-	logger.Info("Starting polling simulation with global phase", zap.String("phase", phase.PhaseName), zap.Time("until", phaseEndTime))
+	startPhase := func() {
+		phase = trafficSchedule[currentPhaseIndex]
+		dur := getRandDuration(phase)
+		phaseEndTime = time.Now().Add(dur)
+		red := phase.ReductionPermilMin
+		if phase.ReductionPermilMax > red {
+			red += rand.Intn(phase.ReductionPermilMax - red + 1)
+		}
+		phaseReduction = red
+		logger.Info("Entering new traffic phase",
+			zap.String("phase", phase.PhaseName),
+			zap.Duration("duration", dur),
+			zap.Int("reductionPermil", phaseReduction),
+		)
+	}
+	startPhase()
 
-	// Track per-file offsets (lines) and first timestamps
-	fileOffsets := make(map[string]int)
-	fileFirstTimestamps := make(map[string]float64)
+	// Track per-file firstTimestamp
+	fileFirstTs := make(map[string]float64)
 	processedFiles := make(map[string]bool)
 
 	for {
@@ -318,16 +342,14 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 		default:
 		}
 
-		// Discover new or unfinished trace files
-		allEntries, _ := os.ReadDir(traceDirPath)
+		// Discover new/unfinished trace files
+		entries, _ := os.ReadDir(traceDirPath)
 		var toProcess []os.DirEntry
-		for _, ent := range allEntries {
-			if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".trace") {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".trace") || processedFiles[e.Name()] {
 				continue
 			}
-			if !processedFiles[ent.Name()] {
-				toProcess = append(toProcess, ent)
-			}
+			toProcess = append(toProcess, e)
 		}
 		if len(toProcess) == 0 {
 			simulationMu.Lock()
@@ -337,16 +359,17 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 			time.Sleep(time.Duration(pollIntervalMinutes) * time.Minute)
 			continue
 		}
-
-		simulationMu.Lock()
-		simulationState = "RUNNING"
-		simulationMu.Unlock()
 		sort.Slice(toProcess, func(i, j int) bool {
 			ti, _ := strconv.ParseInt(strings.TrimSuffix(toProcess[i].Name(), ".trace"), 10, 64)
 			tj, _ := strconv.ParseInt(strings.TrimSuffix(toProcess[j].Name(), ".trace"), 10, 64)
 			return ti < tj
 		})
 
+		simulationMu.Lock()
+		simulationState = "RUNNING"
+		simulationMu.Unlock()
+
+		// Process each file fully once
 		for _, entry := range toProcess {
 			select {
 			case <-stop:
@@ -355,76 +378,63 @@ func runPollingSimulation(durationLimit float64, pollIntervalMinutes int, traffi
 			}
 			fileName := entry.Name()
 			filePath := filepath.Join(traceDirPath, fileName)
-
-			logger.Info("Processing new trace file under current phase",
-				zap.String("file", fileName), zap.String("phase", trafficSchedule[currentPhaseIndex].PhaseName), zap.Time("until", phaseEndTime))
+			logger.Info("Starting file processing under current phase",
+				zap.String("file", fileName), zap.String("phase", phase.PhaseName), zap.Time("until", phaseEndTime),
+			)
 
 			f, err := os.Open(filePath)
 			if err != nil {
-				logger.Error("Failed to open trace file", zap.Error(err), zap.String("path", filePath))
+				logger.Error("Failed to open trace file", zap.Error(err), zap.String("file", fileName))
 				processedFiles[fileName] = true
 				continue
 			}
-			reader := bufio.NewReader(f)
-			scanner := bufio.NewScanner(reader)
+			scanner := bufio.NewScanner(f)
 
-			// Resume from last offset (skip lines)
-			skip := fileOffsets[fileName]
-			for i := 0; i < skip; i++ {
-				if !scanner.Scan() {
-					break
-				}
-			}
-			processedLines := skip
-			firstTs := fileFirstTimestamps[fileName]
+			firstTs := fileFirstTs[fileName]
 			if firstTs == 0 {
 				firstTs = -1
 			}
 
-			// Process lines until phase end or EOF
-			endedByPhase := false
+			// Scan entire file, rotating phase as needed
 			for scanner.Scan() {
-				if time.Now().After(phaseEndTime) {
-					endedByPhase = true
-					break
+				now := time.Now()
+				if now.After(phaseEndTime) {
+					// Rotate phase mid-file
+					logger.Info("Phase end time reached in mid-file, rotating phase",
+						zap.String("phase", phase.PhaseName),
+						zap.String("file", fileName),
+					)
+					currentPhaseIndex = (currentPhaseIndex + 1) % len(trafficSchedule)
+					startPhase()
 				}
 				line := scanner.Text()
-				firstTs, _ = processLine(line, fileName, time.Now(), firstTs, durationLimit,
-					func() int {
-						red := trafficSchedule[currentPhaseIndex].ReductionPermilMin
-						if trafficSchedule[currentPhaseIndex].ReductionPermilMax > red {
-							red += rand.Intn(trafficSchedule[currentPhaseIndex].ReductionPermilMax - red + 1)
-						}
-						return red
-					}(), wg, requests, stop)
-				processedLines++
-			}
-			// Save state
-			fileOffsets[fileName] = processedLines
-			fileFirstTimestamps[fileName] = firstTs
-
-			err = scanner.Err()
-			if err != nil {
-				logger.Error("Error during file scan", zap.Error(err), zap.String("file", fileName))
+				firstTs, _ = processLine(
+					line, fileName, now, firstTs, durationLimit,
+					phaseReduction, wg, requests, stop,
+				)
 			}
 			f.Close()
 
-			// Determine if file done
-			if !endedByPhase && (err == nil && !scanner.Scan()) {
-				processedFiles[fileName] = true
-				delete(fileOffsets, fileName)
-				delete(fileFirstTimestamps, fileName)
-				logger.Info("Trace file fully processed", zap.String("file", fileName))
-			} else {
-				logger.Info("Phase ended before file completion", zap.String("file", fileName), zap.String("phase", trafficSchedule[currentPhaseIndex].PhaseName))
-			}
+			// Mark file done and remove firstTimestamp
+			processedFiles[fileName] = true
+			delete(fileFirstTs, fileName)
+			logger.Info("Finished processing file, moving to next",
+				zap.String("file", fileName), zap.String("phase", phase.PhaseName),
+			)
 
-			// If phase time expired, rotate phase
+			// After file, if phaseEndTime passed, rotate phase
 			if time.Now().After(phaseEndTime) {
+				logger.Info("File completed and phase end time reached, rotating phase",
+					zap.String("phase", phase.PhaseName),
+					zap.String("file", fileName),
+				)
 				currentPhaseIndex = (currentPhaseIndex + 1) % len(trafficSchedule)
-				phase = trafficSchedule[currentPhaseIndex]
-				phaseEndTime = time.Now().Add(getRandDuration(phase))
-				logger.Info("Rotated to next phase", zap.String("newPhase", phase.PhaseName), zap.Time("until", phaseEndTime))
+				startPhase()
+			} else {
+				logger.Info("File completed but the phase has not end yet, continuing the phase in the next file",
+					zap.String("phase", phase.PhaseName),
+					zap.String("file", fileName),
+				)
 			}
 		}
 	}
