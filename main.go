@@ -373,6 +373,7 @@ func runPollingSimulation(
 		for _, entry := range toProcess {
 			select {
 			case <-stop:
+				logger.Info("Simulation stopped externally.")
 				return
 			default:
 			}
@@ -398,6 +399,14 @@ func runPollingSimulation(
 
 			// Scan entire file, rotating phase as needed and replaying delay
 			for scanner.Scan() {
+				select {
+				case <-stop:
+					logger.Info("Simulation stopped externally.")
+					f.Close()
+					return
+				default:
+				}
+
 				// Rotate phase if needed
 				if time.Now().After(phaseEndTime) {
 					logger.Info("Phase end time reached mid-file, rotating phase",
@@ -559,6 +568,7 @@ func startHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func stopHandler(w http.ResponseWriter, r *http.Request) {
+	logger.Info("Received stop request")
 	simulationMu.Lock()
 	if !simulationRun {
 		simulationMu.Unlock()
@@ -575,6 +585,7 @@ func stopHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
+	logger.Info("Received status request")
 	simulationMu.Lock()
 	defer simulationMu.Unlock()
 	state := simulationState
