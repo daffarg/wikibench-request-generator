@@ -299,9 +299,6 @@ func runPollingSimulation(
 ) {
 	traceDirPath := os.Getenv("TRACE_DIR_PATH")
 
-	// Start global simulation startTime for replay delay
-	simStart := time.Now()
-
 	// Global phase control variables
 	currentPhaseIndex := 0
 	var phase TrafficPhase
@@ -393,6 +390,7 @@ func runPollingSimulation(
 			}
 			scanner := bufio.NewScanner(f)
 
+			fileStart := time.Now()
 			firstTs := fileFirstTs[fileName]
 			if firstTs == 0 {
 				firstTs = -1
@@ -411,7 +409,7 @@ func runPollingSimulation(
 				line := scanner.Text()
 				// Replay timing based on simStart and trace timestamps
 				firstTs, _ = processLine(
-					line, fileName, simStart, firstTs, durationLimit,
+					line, fileName, fileStart, firstTs, durationLimit,
 					phaseReduction, wg, requests, stop,
 				)
 			}
